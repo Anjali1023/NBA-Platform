@@ -68,12 +68,42 @@ https://github.com/Anjali1023/NBA-Platform
 -   Supabase account
 -   Google Gemini API Key
 
+---
+
+## Running the Project
+
+> **Important:** Start the services in the following order:
+>
+> 1. ChromaDB
+> 2. Backend
+> 3. Frontend
+
+---
+
+### Terminal 1 — Start ChromaDB
+
+```bash
+cd nba-platform\backend
+
+chroma run --host localhost --port 8002
+```
+
+This starts the ChromaDB vector database, which is required by the Retrieval Agent.
+
+---
+
+### Terminal 2 — Start Backend
+
+```bash
 ## Backend Setup
 
 ``` bash
 git clone <repository-url>
 cd nba-platform/backend
 pip install -r requirements.txt
+ 
+uvicorn api.main:app --host 0.0.0.0 --port 8001 --reload
+
 ```
 
 Create a `.env` file:
@@ -82,25 +112,61 @@ Create a `.env` file:
 GOOGLE_API_KEY=YOUR_GEMINI_API_KEY
 SUPABASE_URL=YOUR_SUPABASE_URL
 SUPABASE_KEY=YOUR_SUPABASE_KEY
+CHROMA_HOST=localhost
+CHROMA_PORT=8002
 ```
 
-Run the backend:
 
-``` bash
-uvicorn api.main:app --host 0.0.0.0 --port 8000
+The FastAPI backend will be available at:
+
+```
+http://localhost:8001
 ```
 
-## Frontend Setup
+---
 
-``` bash
-cd frontend
-npm install
+### Terminal 3 — Start Frontend
+
+```bash
+cd nba-platform\frontend
+
 npm run dev
 ```
+
+The React application will start on:
+
+```
+http://localhost:5173
+```
+
+---
+
+## Access the Application
+
+Once all three services are running, open your browser and navigate to:
+
+```
+http://localhost:5173
+```
+
+---
+
+## Startup Sequence
+
+Always start the application in the following order:
+
+1. **ChromaDB** (Port **8002**)
+2. **FastAPI Backend** (Port **8001**)
+3. **React Frontend** (Port **5173**)
+
+Following this sequence ensures that the backend can successfully connect to the ChromaDB vector database before processing requests.
+
 
 Frontend: `http://localhost:5173`
 
 Backend: `http://localhost:8000`
+
+---
 
 ## Database Setup
 
