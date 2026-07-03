@@ -53,6 +53,7 @@ class ApprovalRequest(BaseModel):
     session_id: str | None = None
     approved: bool
     feedback: str = ""
+    rec_index: int | None = None
 
 
 def _normalize_interaction(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -114,6 +115,7 @@ async def approve_interaction(interaction_id: str, request: ApprovalRequest):
             interaction_id,
             request.approved,
             request.feedback,
+            request.rec_index,
         )
         if not updated:
             raise HTTPException(status_code=404, detail="Interaction not found")

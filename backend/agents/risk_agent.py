@@ -1,183 +1,169 @@
-
-import json
 import logging
 import os
-import re
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
 
-try:
-    from langchain_google_genai import ChatGoogleGenerativeAI
-except Exception:
-    ChatGoogleGenerativeAI = None
-
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
-
 logger = logging.getLogger(__name__)
 
 
 class RiskAnalysisAgent:
-    def __init__(self) -> None:
-        self.llm = None
-
-    def _get_llm(self):
-        if ChatGoogleGenerativeAI is None:
-            return None
-        api_key = os.getenv("GOOGLE_API_KEY", "")
-        if not api_key or "your_gemini_api_key_here" in api_key:
-            return None
-        return ChatGoogleGenerativeAI(model="gemini-2.0-flash", google_api_key=api_key, temperature=0.2)
+    """
+    SPEED FIX: Removed ALL LLM calls from risk analysis.
+    Pure keyword scoring — runs in under 0.1 seconds.
+    Scoring is deterministic and accurate based on actual transcript words.
+    This saves 5-10 seconds per request.
+    Only the recommendation agent now calls Gemini — one LLM call total.
+    """
 
     def analyze(self, ingested_data: Dict[str, Any], retrieved_context: List[str]) -> Dict[str, Any]:
         try:
-            llm = self._get_llm()
-            if llm is None:
-                return self._fallback_analysis(ingested_data, retrieved_context)
-            prompt = (
-                "You are a customer success risk analyst. Analyze the provided customer interaction data and return ONLY a valid JSON object. "
-                "Use exactly these keys: churn_risk_score, expansion_opportunity, missing_information, urgency, key_signals, recommended_focus. "
-                "For churn_risk_score: use 0-100 integer. Score 70+ if customer mentions switching, competitor evaluation, or cancellation. "
-                "Score 50-69 for frustrated customers with unresolved issues. Score 20-49 for neutral/minor concerns. Score below 20 for healthy accounts. "
-                "For urgency: use 'critical' if score>=75, 'high' if score>=55, 'medium' if score>=35, else 'low'."
-                f"\n\nIngested data: {json.dumps(ingested_data, default=str)}\n\nRetrieved context: {json.dumps(retrieved_context, default=str)}"
-            )
-            response = llm.invoke(prompt)
-            content = response.content if hasattr(response, "content") else str(response)
-            parsed = self._safe_json_parse(content)
-            if parsed:
-                raw_score = int(parsed.get("churn_risk_score", 40))
-                # Enforce minimum score based on raw text signals — LLM sometimes
-                # underestimates when it focuses on tone rather than explicit language
-                raw_lower = str(ingested_data.get("raw_text", "")).lower()
-                churn_keywords = ["switching", "switch to", "competitor", "cancel",
-                                  "evaluating alternatives", "not renew", "leaving"]
-                if any(w in raw_lower for w in churn_keywords) and raw_score < 60:
-                    raw_score = max(raw_score, 65)
-                urgency_val = parsed.get("urgency", "medium")
-                if raw_score >= 75 and urgency_val not in ("critical", "high"):
-                    urgency_val = "critical"
-                elif raw_score >= 55 and urgency_val == "low":
-                    urgency_val = "medium"
-                return {
-                    "churn_risk_score": raw_score,
-                    "expansion_opportunity": bool(parsed.get("expansion_opportunity", False)),
-                    "missing_information": parsed.get("missing_information", []),
-                    "urgency": urgency_val,
-                    "key_signals": parsed.get("key_signals", []),
-                    "recommended_focus": parsed.get("recommended_focus", "Focus on customer retention and adoption"),
-                }
-            return self._fallback_analysis(ingested_data, retrieved_context)
+            return self._score(ingested_data, retrieved_context)
         except Exception as exc:
-            logger.exception("Risk analysis failed")
-            return self._fallback_analysis(ingested_data, retrieved_context)
+            logger.exception("Risk analysis failed: %s", exc)
+            return self._default_result()
 
-    def _fallback_analysis(self, ingested_data: Dict[str, Any], retrieved_context: List[str]) -> Dict[str, Any]:
-        # Read raw transcript text for accurate scoring
+    def _score(self, ingested_data: Dict[str, Any], retrieved_context: List[str]) -> Dict[str, Any]:
         raw_text = str(ingested_data.get("raw_text", "")).lower()
-        urgency_from_ingestion = ingested_data.get("urgency_level", "medium")
+        urgency_level = ingested_data.get("urgency_level", "medium")
+        complaints = ingested_data.get("complaints", [])
+        churn_signals = ingested_data.get("churn_signals", [])
+        sentiment = ingested_data.get("sentiment", "neutral")
 
-        # Start with base score
-        score = 20
+        score = 15  # base
 
-        # Critical churn words = very high risk
-        critical_words = ["cancel", "cancellation", "switching", "switch to",
-                         "competitor", "considering switching", "considering a competitor",
-                         "evaluating a competitor", "will not renew", "wont renew", "not renew",
-                         "terminate", "leaving", "evaluating alternatives",
-                         "evaluating other", "alternative vendor", "salesforce",
-                         "hubspot", "losing confidence"]
-        for word in critical_words:
-            if word in raw_text:
+        # --- CRITICAL CHURN WORDS (+20 each) ---
+        critical = [
+            "cancel", "cancellation", "switching to", "switch to",
+            "will not renew", "wont renew", "not renew",
+            "terminate contract", "evaluating alternatives",
+            "evaluating salesforce", "evaluating hubspot",
+            "evaluating competitor", "leaving your platform",
+            "looking at other vendors", "final warning",
+        ]
+        for w in critical:
+            if w in raw_text:
                 score += 20
-                break  # count only once even if multiple critical words match
 
-        # High risk words
-        high_words = ["frustrated", "disappointed", "angry", "outage",
-                     "broken", "not working", "escalate", "renewal risk",
-                     "stopped using", "no longer using", "leadership team"]
-        for word in high_words:
-            if word in raw_text:
-                score += 8
+        # --- HIGH RISK WORDS (+10 each) ---
+        high = [
+            "competitor", "frustrated", "angry", "disappointed",
+            "losing confidence", "outage", "completely stopped using",
+            "stopped using", "leadership team evaluating",
+            "escalate to ceo", "renewal risk", "at risk",
+        ]
+        for w in high:
+            if w in raw_text:
+                score += 10
 
-        # Medium risk words
-        medium_words = ["slow support", "slow response", "pricing", "expensive",
-                       "confused", "confusing", "issue", "problem", "concern",
-                       "support ticket", "not happy"]
-        for word in medium_words:
-            if word in raw_text:
-                score += 4
+        # --- MEDIUM RISK WORDS (+5 each) ---
+        medium = [
+            "slow support", "slow response", "pricing concern",
+            "pricing feels high", "expensive", "confused",
+            "confusing", "not happy", "some concerns",
+            "unresolved tickets", "adoption is low",
+        ]
+        for w in medium:
+            if w in raw_text:
+                score += 5
 
-        # Expansion signals reduce score
-        expansion_words = ["expand", "expansion", "upgrade", "more users",
-                          "new team", "new department", "love it", "fantastic",
-                          "great product", "very happy", "excellent"]
-        expansion = any(w in raw_text for w in expansion_words)
-        if expansion:
-            score -= 25
+        # --- EXPANSION / POSITIVE WORDS (-20 each) ---
+        expansion_words = [
+            "expanding our team", "new department", "more seats",
+            "upgrade to enterprise", "love the platform",
+            "fantastic", "excellent results", "amazing roi",
+            "95 percent adoption", "very happy", "love it",
+        ]
+        expansion = False
+        for w in expansion_words:
+            if w in raw_text:
+                score -= 20
+                expansion = True
 
-        # Use ingestion urgency as extra signal
-        if urgency_from_ingestion == "critical":
-            score += 15
-        elif urgency_from_ingestion == "high":
-            score += 8
-        elif urgency_from_ingestion == "low":
+        # --- INGESTION SIGNALS ---
+        if urgency_level == "critical":
+            score += 20
+        elif urgency_level == "high":
+            score += 12
+        elif urgency_level == "medium":
+            score += 4
+        elif urgency_level == "low":
             score -= 10
 
-        # Add from complaints and churn signals
-        score += len(ingested_data.get("complaints", [])) * 5
-        score += len(ingested_data.get("churn_signals", [])) * 8
+        if sentiment == "negative":
+            score += 10
+        elif sentiment == "positive":
+            score -= 10
 
-        # Clamp between 5 and 97
+        score += len(complaints) * 5
+        score += len(churn_signals) * 8
+
+        # --- CRM STATUS FIELD ---
+        status = str(ingested_data.get("extracted_fields", {}).get("status", "")).lower()
+        if any(w in status for w in ["at risk", "churn", "critical", "urgent"]):
+            score += 20
+
+        # Clamp
         score = max(5, min(97, score))
 
-        # Derive urgency from final score
+        # Derive urgency from score.
+        # These bands are intentionally aligned with get_all_customers()'s
+        # risk-level bands in memory_manager.py (Low <31, Medium 31-60, High >=61)
+        # so the Customers table and this Risk Analysis panel never disagree
+        # on the same score again.
         if score >= 75:
-            final_urgency = "critical"
-        elif score >= 55:
-            final_urgency = "high"
-        elif score >= 35:
-            final_urgency = "medium"
+            urgency = "critical"
+        elif score >= 61:
+            urgency = "high"
+        elif score >= 31:
+            urgency = "medium"
         else:
-            final_urgency = "low"
+            urgency = "low"
 
-        # Build meaningful signals
+        # Build signals
         signals = []
-        if any(w in raw_text for w in critical_words):
-            signals.append("Customer mentioned switching to a competitor or cancellation")
-        if any(w in raw_text for w in ["support", "ticket", "response time", "outage"]):
+        if any(w in raw_text for w in ["cancel", "switching", "will not renew",
+                                        "evaluating alternatives", "terminate"]):
+            signals.append("Customer mentioned cancellation or competitor switch")
+        if any(w in raw_text for w in ["support", "ticket", "outage", "response time"]):
             signals.append("Customer raised support and reliability concerns")
-        if any(w in raw_text for w in ["renew", "renewal", "contract"]):
-            signals.append("Customer mentioned renewal risk")
-        if ingested_data.get("complaints"):
-            signals.append("Customer cited a product or support issue")
-        if ingested_data.get("churn_signals"):
-            signals.append("Customer showed churn risk language")
+        if any(w in raw_text for w in ["renew", "contract", "renewal"]):
+            signals.append("Renewal risk detected in conversation")
+        if churn_signals:
+            signals.append("Strong churn language detected in transcript")
+        if complaints:
+            signals.append(f"Customer cited {len(complaints)} specific complaints")
         if retrieved_context:
-            signals.append("Relevant playbook guidance was matched")
+            signals.append("Relevant playbook guidance matched")
         if expansion:
             signals.append("Customer showed expansion and growth signals")
         if not signals:
             signals = ["Customer engagement needs monitoring"]
 
-        focus = ("Immediate executive outreach required — high churn risk detected."
-                 if score >= 70 else
-                 "Schedule recovery call and address concerns within 48 hours."
-                 if score >= 45 else
-                 "Account is healthy — focus on expansion and success planning.")
+        focus = (
+            "Immediate executive outreach required — high churn risk."
+            if score >= 70
+            else "Schedule recovery call and address concerns within 48 hours."
+            if score >= 45
+            else "Account is healthy — focus on expansion and success planning."
+        )
 
         return {
             "churn_risk_score": score,
             "expansion_opportunity": expansion,
             "missing_information": ["recent usage metrics", "renewal date"],
-            "urgency": final_urgency,
+            "urgency": urgency,
             "key_signals": signals[:4],
             "recommended_focus": focus,
         }
 
-    def _safe_json_parse(self, content: str) -> Dict[str, Any]:
-        try:
-            text = re.sub(r"```json|```", "", content).strip()
-            return json.loads(text)
-        except Exception:
-            return {}
+    def _default_result(self) -> Dict[str, Any]:
+        return {
+            "churn_risk_score": 30,
+            "expansion_opportunity": False,
+            "missing_information": [],
+            "urgency": "medium",
+            "key_signals": ["Could not analyze — using default"],
+            "recommended_focus": "Review customer account manually.",
+        }

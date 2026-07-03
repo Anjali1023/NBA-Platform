@@ -417,32 +417,76 @@ def save_interaction(
     return interaction_id
 
 
-def update_approval(interaction_id: str, approved: bool, feedback: str = "") -> bool:
+def _apply_rec_approval(recommendations: Any, rec_index: int | None, approved: bool) -> Any:
+    """Stamp approved/status onto a single recommendation inside the list,
+    leaving the others untouched. Returns the (possibly modified) list."""
+    if isinstance(recommendations, str):
+        try:
+            recommendations = json.loads(recommendations)
+        except Exception:
+            recommendations = []
+    if not isinstance(recommendations, list):
+        return recommendations
+    if rec_index is not None and 0 <= rec_index < len(recommendations):
+        rec = recommendations[rec_index]
+        if isinstance(rec, dict):
+            rec["approved"] = approved
+            rec["status"] = "approved" if approved else "rejected"
+    return recommendations
+
+
+def update_approval(
+    interaction_id: str,
+    approved: bool,
+    feedback: str = "",
+    rec_index: int | None = None,
+) -> bool:
     try:
         client = get_client()
         if client is None:
             for item in _FALLBACK_STORE:
                 if str(item.get("id")) == str(interaction_id):
-                    item["approved"] = approved
+                    item["recommendations"] = _apply_rec_approval(
+                        item.get("recommendations", []), rec_index, approved
+                    )
+                    # Overall flag stays True once any single recommendation
+                    # has been approved, so existing dashboard stats keep working.
+                    item["approved"] = item.get("approved", False) or approved
                     item["feedback"] = feedback
                     return True
             return False
 
+        # Fetch the current row first so we can patch just one recommendation
+        # inside the JSON array without clobbering the others.
+        existing = client.table("interactions").select("recommendations, approved").eq("id", interaction_id).execute()
+        current_recs = existing.data[0].get("recommendations") if existing.data else []
+        patched_recs = _apply_rec_approval(current_recs, rec_index, approved)
+        overall_approved = bool(existing.data[0].get("approved")) if existing.data else False
+        overall_approved = overall_approved or approved
+
         result = client.table("interactions") \
-            .update({"approved": approved, "feedback": feedback}) \
+            .update({
+                "approved": overall_approved,
+                "feedback": feedback,
+                "recommendations": patched_recs,
+            }) \
             .eq("id", interaction_id) \
             .execute()
         # Also update fallback store in case it was saved there
         for item in _FALLBACK_STORE:
             if str(item.get("id")) == str(interaction_id):
-                item["approved"] = approved
+                item["recommendations"] = patched_recs
+                item["approved"] = overall_approved
                 item["feedback"] = feedback
         return bool(result.data)
     except Exception as exc:
         logger.error("Approval update failed: %s", exc)
         for item in _FALLBACK_STORE:
             if str(item.get("id")) == str(interaction_id):
-                item["approved"] = approved
+                item["recommendations"] = _apply_rec_approval(
+                    item.get("recommendations", []), rec_index, approved
+                )
+                item["approved"] = item.get("approved", False) or approved
                 item["feedback"] = feedback
                 return True
         return False

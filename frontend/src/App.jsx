@@ -116,6 +116,7 @@ export default function App() {
       setRiskAnalysis(null);
       setRecommendations([]);
       setInteractionId("");
+      setApprovedStates({});
       return;
     }
     const latest = history[0];
@@ -126,10 +127,21 @@ export default function App() {
       expansion_opportunity: !!latest.expansion_opportunity,
       key_signals: Array.isArray(latest.key_signals) ? latest.key_signals : [],
     });
-    setRecommendations(_normalizeRecs(latest.recommendations));
+    const latestRecs = _normalizeRecs(latest.recommendations);
+    setRecommendations(latestRecs);
     setInteractionId(latest.id || "");
     if (latest.input_text) setTranscript(latest.input_text);
     if (latest.input_type) setInputType(latest.input_type);
+    // Rebuild the approved/rejected badges from the actual saved data for
+    // this interaction, rather than reusing whatever was left over from the
+    // previously viewed customer/analysis (that was the source of cards
+    // showing "Approved" for an interaction nobody had approved yet).
+    const restored = {};
+    latestRecs.forEach((r, i) => {
+      if (r && r.approved === true) restored[i] = "approved";
+      else if (r && r.approved === false && r.status === "rejected") restored[i] = "rejected";
+    });
+    setApprovedStates(restored);
   }, [history]);
 
   useEffect(() => {
@@ -239,6 +251,10 @@ export default function App() {
     setRiskAnalysis(null);
     setAgentSteps([]);
     setInteractionId("");
+    // A fresh analysis always starts as a brand new, unapproved interaction —
+    // clear any leftover Approved/Rejected UI state from whatever was shown
+    // before, so card 1/2/3 don't inherit a previous interaction's status.
+    setApprovedStates({});
     const sid = `session-${Date.now()}`;
     setSessionId(sid);
 
@@ -308,6 +324,7 @@ export default function App() {
       await axios.post(`${API_BASE}/api/approve/${interactionId}`, {
         approved,
         feedback: approved ? "Approved by CSM" : "Rejected by CSM",
+        rec_index: index,
       });
       setApprovedStates((prev) => ({ ...prev, [index]: approved ? "approved" : "rejected" }));
       setError("");
@@ -762,7 +779,19 @@ export default function App() {
                             Risk {item.risk_score}%
                           </span>
                         )}
-                        <div style={{ fontSize: 12, fontWeight: 600, color: item.approved ? neonGreen : "#f87171" }}>{item.approved ? "✓ Approved" : "✗ Pending"}</div>
+                        {(() => {
+                          const recs = Array.isArray(item.recommendations) ? item.recommendations : [];
+                          const approvedCount = recs.filter((r) => r && r.approved === true).length;
+                          const rejectedCount = recs.filter((r) => r && r.approved === false && r.status === "rejected").length;
+                          const label =
+                            approvedCount === 0 && rejectedCount === 0
+                              ? "Pending"
+                              : `${approvedCount}/${recs.length || 0} Approved`;
+                          const color = approvedCount > 0 ? neonGreen : rejectedCount > 0 ? "#f87171" : "rgba(255,255,255,0.4)";
+                          return (
+                            <div style={{ fontSize: 12, fontWeight: 600, color }}>{label}</div>
+                          );
+                        })()}
                       </div>
                     </div>
                     {item.input_text && (
@@ -773,16 +802,28 @@ export default function App() {
                     {Array.isArray(item.recommendations) && item.recommendations.length > 0 ? (
                       <div style={{ display: "grid", gap: 8 }}>
                         {item.recommendations.map((rec, idx) => (
-                          <div key={`${rec.action || idx}-${idx}`} style={{ padding: "10px 14px", borderRadius: 8, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.07)", display: "flex", alignItems: "flex-start", gap: 10 }}>
+                          <div key={`${rec.action || idx}-${idx}`} style={{
+                            padding: "10px 14px", borderRadius: 8,
+                            background: rec.approved === true ? "rgba(0,255,157,0.05)" : rec.approved === false && rec.status === "rejected" ? "rgba(239,68,68,0.04)" : "rgba(255,255,255,0.04)",
+                            border: rec.approved === true ? `1px solid ${neonGreen}40` : rec.approved === false && rec.status === "rejected" ? "1px solid #ef444440" : "1px solid rgba(255,255,255,0.07)",
+                            display: "flex", alignItems: "flex-start", gap: 10,
+                          }}>
                             <div style={{ minWidth: 6, height: 6, borderRadius: "50%", background: getPriorityColor(rec.priority), marginTop: 5, flexShrink: 0 }} />
                             <div style={{ flex: 1 }}>
                               <div style={{ fontSize: 13, fontWeight: 600, color: "#fff", marginBottom: 3 }}>{rec.action || rec.title || "Recommendation"}</div>
                               {rec.rationale && <div style={{ fontSize: 12, color: "rgba(255,255,255,0.5)", lineHeight: 1.4 }}>{rec.rationale}</div>}
                               {rec.expected_outcome && <div style={{ fontSize: 11, color: neonGreen, marginTop: 4 }}>→ {rec.expected_outcome}</div>}
                             </div>
-                            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, minWidth: 60 }}>
+                            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, minWidth: 70 }}>
                               {rec.priority && <span style={{ fontSize: 10, padding: "2px 6px", borderRadius: 999, background: `${getPriorityColor(rec.priority)}22`, color: getPriorityColor(rec.priority), fontWeight: 600, textTransform: "uppercase" }}>{rec.priority}</span>}
                               {rec.confidence != null && <span style={{ fontSize: 10, color: "rgba(255,255,255,0.35)" }}>{Math.round(rec.confidence * 100)}% conf.</span>}
+                              {rec.approved === true ? (
+                                <span style={{ fontSize: 10, fontWeight: 700, color: neonGreen, padding: "2px 6px", borderRadius: 999, background: "rgba(0,255,157,0.12)", border: `1px solid ${neonGreen}40` }}>✓ Approved</span>
+                              ) : rec.approved === false && rec.status === "rejected" ? (
+                                <span style={{ fontSize: 10, fontWeight: 700, color: "#f87171", padding: "2px 6px", borderRadius: 999, background: "rgba(239,68,68,0.12)", border: "1px solid #ef444440" }}>✗ Rejected</span>
+                              ) : (
+                                <span style={{ fontSize: 10, color: "rgba(255,255,255,0.3)" }}>Pending</span>
+                              )}
                             </div>
                           </div>
                         ))}
