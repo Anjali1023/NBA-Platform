@@ -1,0 +1,12 @@
+langgraph
+langchain
+langchain-google-genai
+google-generativeai
+fastapi
+uvicorn
+python-dotenv
+chromadb
+sentence-transformers
+supabase
+psycopg2-binary
+pydantic

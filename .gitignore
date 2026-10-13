@@ -1,0 +1,13 @@
+backend/.env
+.env
+node_modules/
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+.venv/
+
+# Generated Chroma database
+backend/chroma/
